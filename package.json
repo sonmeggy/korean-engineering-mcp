@@ -1,0 +1,27 @@
+{
+  "name": "korean-engineering-mcp",
+  "version": "1.0.0",
+  "description": "한국 건설기준(KDS/KCS)과 법제처 법령을 통합 검색하는 MCP 서버",
+  "type": "module",
+  "bin": {
+    "korean-engineering-mcp": "./index.js"
+  },
+  "files": [
+    "index.js"
+  ],
+  "keywords": [
+    "mcp",
+    "korean",
+    "engineering",
+    "construction",
+    "KDS",
+    "KCS",
+    "법령",
+    "건설기준"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.22.0"
+  }
+}
