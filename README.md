@@ -13,6 +13,7 @@
 | 법령 | `search_interpretations` | 법령 해석례 검색 |
 | 법령 | `search_admin_rules` | 고시·예규·훈령·지침 검색 |
 | **통합** | **`comprehensive_research`** | **법령 + 건설기준 동시 검색** |
+| 해설편 | `search_design_manual` | 로컬 설계기준 해설편 키워드 검색 (파일 보유 시) |
 
 ---
 
@@ -36,11 +37,21 @@
 
 ### Claude Code (CLI)
 
+기본 설치:
 ```bash
 claude mcp add korean-engineering-mcp \
   -e KCSC_API_KEY=여기에_KCSC_키_입력 \
   -e LAW_API_KEY=여기에_법제처_키_입력 \
-  -- npx -y korean-engineering-mcp
+  -- npx -y github:sonmeggy/korean-engineering-mcp
+```
+
+설계기준 해설편 파일 보유 시 (`REFERENCE_DIR` 추가):
+```bash
+claude mcp add korean-engineering-mcp \
+  -e KCSC_API_KEY=여기에_KCSC_키_입력 \
+  -e LAW_API_KEY=여기에_법제처_키_입력 \
+  -e REFERENCE_DIR=해설편_파일이_있는_폴더_경로 \
+  -- npx -y github:sonmeggy/korean-engineering-mcp
 ```
 
 재시작 없이 현재 세션에 즉시 추가됩니다.
@@ -57,10 +68,11 @@ claude mcp add korean-engineering-mcp \
   "mcpServers": {
     "korean-engineering-mcp": {
       "command": "npx",
-      "args": ["-y", "korean-engineering-mcp"],
+      "args": ["-y", "github:sonmeggy/korean-engineering-mcp"],
       "env": {
         "KCSC_API_KEY": "여기에_KCSC_키_입력",
-        "LAW_API_KEY": "여기에_법제처_키_입력"
+        "LAW_API_KEY": "여기에_법제처_키_입력",
+        "REFERENCE_DIR": "해설편_파일이_있는_폴더_경로 (선택사항)"
       }
     }
   }

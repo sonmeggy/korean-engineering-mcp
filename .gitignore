@@ -1,3 +1,4 @@
 node_modules/
 *.log
 .env
+*해설편*.md

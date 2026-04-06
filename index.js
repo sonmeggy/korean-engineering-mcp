@@ -2,11 +2,52 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { readFileSync, existsSync } from "fs";
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
 
 const KCSC_KEY = process.env.KCSC_API_KEY || "";
 const LAW_KEY  = process.env.LAW_API_KEY  || "dohwa3547";
 const KCSC_BASE = "https://kcsc.re.kr/OpenApi";
 const LAW_BASE  = "https://www.law.go.kr/DRF";
+
+// ── 로컬 설계기준 해설편 ──────────────────────────────────────
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const REFERENCE_DIR = process.env.REFERENCE_DIR || __dirname;
+
+const REFERENCE_FILES = {
+  상수도: join(REFERENCE_DIR, "상수도설계기준_해설편(2023).md"),
+  하수도: join(REFERENCE_DIR, "하수도설계기준_해설편(2020).md"),
+};
+
+// 파일을 마크다운 헤더(#) 단위 섹션으로 분할
+function parseSections(content) {
+  const lines = content.split("\n");
+  const sections = [];
+  let title = "(서두)";
+  let body = [];
+
+  for (const line of lines) {
+    if (/^#{1,4}\s/.test(line)) {
+      if (body.length) sections.push({ title, content: body.join("\n").trim() });
+      title = line.replace(/^#+\s*/, "").trim();
+      body = [line];
+    } else {
+      body.push(line);
+    }
+  }
+  if (body.length) sections.push({ title, content: body.join("\n").trim() });
+  return sections;
+}
+
+// 시작 시 파일 로딩 (없으면 빈 배열)
+const referenceDocs = {};
+for (const [name, filePath] of Object.entries(REFERENCE_FILES)) {
+  if (existsSync(filePath)) {
+    const raw = readFileSync(filePath, "utf-8");
+    referenceDocs[name] = parseSections(raw);
+  }
+}
 
 // ── KCSC API ──────────────────────────────────────────────────
 async function fetchKCSC(path) {
@@ -354,6 +395,77 @@ server.tool(
     return { content: [{ type: "text", text: lines.join("\n") }] };
   }
 );
+
+
+// ══════════════════════════════════════════════════════════════
+// 로컬 설계기준 해설편 검색 (파일이 있을 때만 등록)
+// ══════════════════════════════════════════════════════════════
+
+const availableDocs = Object.keys(referenceDocs);
+
+if (availableDocs.length > 0) {
+  server.tool(
+    "search_design_manual",
+    `로컬 설계기준 해설편에서 키워드 검색 (보유 문서: ${availableDocs.join(", ")}설계기준 해설편)`,
+    {
+      query:    z.string().describe("검색 키워드 (예: 배수지 용량, 관거 경사, 슬러지 처리)"),
+      document: z.enum(["상수도", "하수도", "전체"]).default("전체")
+                 .describe("검색 대상 문서 선택"),
+      max_results: z.number().default(3).describe("반환할 최대 섹션 수 (기본 3)"),
+    },
+    async ({ query, document, max_results }) => {
+      const keywords = query.trim().split(/\s+/).filter(Boolean);
+      const targets = document === "전체" ? availableDocs : [document].filter(d => referenceDocs[d]);
+
+      if (!targets.length) {
+        return { content: [{ type: "text", text: `'${document}' 해설편 파일이 없습니다.` }] };
+      }
+
+      const results = [];
+
+      for (const docName of targets) {
+        const sections = referenceDocs[docName];
+
+        const scored = sections
+          .map((sec) => {
+            const text = `${sec.title}\n${sec.content}`;
+            const score = keywords.reduce((s, kw) => {
+              const matches = (text.match(new RegExp(kw, "g")) || []).length;
+              return s + matches;
+            }, 0);
+            return { docName, ...sec, score };
+          })
+          .filter((s) => s.score > 0)
+          .sort((a, b) => b.score - a.score)
+          .slice(0, max_results);
+
+        results.push(...scored);
+      }
+
+      if (!results.length) {
+        return { content: [{ type: "text", text: `'${query}' 관련 내용을 해설편에서 찾을 수 없습니다.` }] };
+      }
+
+      // 점수 높은 순 재정렬
+      results.sort((a, b) => b.score - a.score);
+
+      const lines = [`설계기준 해설편 검색결과: '${query}' (${results.length}건)\n`];
+      for (const r of results) {
+        lines.push(`${"─".repeat(50)}`);
+        lines.push(`📘 [${r.docName}설계기준 해설편] ${r.title}`);
+        lines.push("");
+        // 내용은 최대 1000자로 제한
+        const preview = r.content.length > 1000
+          ? r.content.slice(0, 1000) + "\n...(이하 생략)"
+          : r.content;
+        lines.push(preview);
+        lines.push("");
+      }
+
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    }
+  );
+}
 
 
 // ── 실행 ──────────────────────────────────────────────────────
