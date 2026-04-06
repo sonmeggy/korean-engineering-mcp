@@ -91,3 +91,11 @@ comprehensive_research("하수도 기술진단 자격")
 ## Node.js 요구사항
 
 Node.js 18 이상
+
+---
+
+## 참고 및 감사
+
+법제처 API 연동 방식은 아래 프로젝트를 참고했습니다.
+
+- [korean-law-mcp](https://github.com/chrisryugj/korean-law-mcp) by [@chrisryugj](https://github.com/chrisryugj) — 법제처 Open API 기반 한국 법령 검색 MCP 서버
