@@ -7,7 +7,7 @@ import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 
 const KCSC_KEY = process.env.KCSC_API_KEY || "";
-const LAW_KEY  = process.env.LAW_API_KEY  || "dohwa3547";
+const LAW_KEY  = process.env.LAW_API_KEY  || "";
 const KCSC_BASE = "https://kcsc.re.kr/OpenApi";
 const LAW_BASE  = "https://www.law.go.kr/DRF";
 
@@ -51,6 +51,7 @@ for (const [name, filePath] of Object.entries(REFERENCE_FILES)) {
 
 // ── KCSC API ──────────────────────────────────────────────────
 async function fetchKCSC(path) {
+  requireApiKey("KCSC_API_KEY", KCSC_KEY);
   const sep = path.includes("?") ? "&" : "?";
   const url = `${KCSC_BASE}${path}${sep}key=${KCSC_KEY}`;
   const res = await fetch(url);
@@ -60,6 +61,7 @@ async function fetchKCSC(path) {
 
 // ── 법제처 API ────────────────────────────────────────────────
 async function fetchLaw(endpoint, params = {}) {
+  requireApiKey("LAW_API_KEY", LAW_KEY);
   const url = new URL(`${LAW_BASE}/${endpoint}`);
   url.searchParams.set("OC", LAW_KEY);
   url.searchParams.set("type", "JSON");
@@ -93,6 +95,151 @@ function extractList(obj, ...keys) {
     if (val && typeof val === "object") return [val];
   }
   return [];
+}
+
+function requireApiKey(name, value) {
+  if (!value) throw new Error(`${name} 환경변수가 설정되지 않았습니다. .env 또는 MCP 설정 env에 값을 넣어주세요.`);
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function keywordsFrom(text) {
+  return String(text || "")
+    .replace(/["'“”‘’()[\]{}]/g, " ")
+    .split(/\s+/)
+    .map((x) => x.trim())
+    .filter((x) => x.length >= 2);
+}
+
+function compactText(text, max = 350) {
+  const normalized = stripHtml(text).replace(/\s+/g, " ").trim();
+  return normalized.length > max ? `${normalized.slice(0, max)}…` : normalized;
+}
+
+function scoreText(text, keywords) {
+  const haystack = String(text || "");
+  return keywords.reduce((score, kw) => score + (haystack.includes(kw) ? 1 : 0), 0);
+}
+
+function standardAuthorityRank(codeType) {
+  const rank = { KDS: 1, KCS: 2, KWCS: 3, LHCS: 4, SMCS: 5, EXCS: 6, NHCS: 7, KRCCS: 8, KRACS: 9 };
+  return rank[codeType] || 99;
+}
+
+function sourceUrlForStandard(item) {
+  return item?.no ? `https://www.kcsc.re.kr/StandardCode/Viewer/${item.no}` : "https://www.kcsc.re.kr";
+}
+
+async function findStandardEvidence(query, { includeLocalStandards = false, maxStandards = 3, maxSectionsPerStandard = 2 } = {}) {
+  requireApiKey("KCSC_API_KEY", KCSC_KEY);
+  const codeList = await fetchKCSC("/CodeList");
+  const list = Array.isArray(codeList) ? codeList : [];
+  const keywords = keywordsFrom(query);
+  const allowedTypes = includeLocalStandards ? null : new Set(["KDS", "KCS"]);
+  const candidates = list
+    .map((item) => ({
+      item,
+      score: scoreText(`${item.code || ""} ${item.fullCode || ""} ${item.name || ""}`, keywords),
+    }))
+    .filter(({ item, score }) => score > 0 && (!allowedTypes || allowedTypes.has(item.codeType)))
+    .sort((a, b) => b.score - a.score || standardAuthorityRank(a.item.codeType) - standardAuthorityRank(b.item.codeType))
+    .slice(0, maxStandards);
+
+  const evidence = [];
+  for (const { item, score } of candidates) {
+    const entry = {
+      source_type: item.codeType,
+      title: item.name || "",
+      code: item.code || "",
+      full_code: item.fullCode || "",
+      revision: item.version || "",
+      updated_at: item.updateDate?.split("T")[0] || "",
+      url: sourceUrlForStandard(item),
+      relevance_score: score,
+      sections: [],
+    };
+    if (["KDS", "KCS"].includes(item.codeType) && item.code) {
+      try {
+        const detail = await fetchKCSC(`/CodeViewer/${item.codeType}/${item.code}`);
+        const detailItem = Array.isArray(detail) ? detail[0] : detail;
+        const sections = detailItem?.list || [];
+        entry.sections = sections
+          .map((sec) => ({
+            title: sec.title || "",
+            level: sec.level || 1,
+            quote: compactText(sec.contents || "", 420),
+            score: scoreText(`${sec.title || ""} ${stripHtml(sec.contents || "")}`, keywords),
+          }))
+          .filter((sec) => sec.score > 0 && sec.quote)
+          .sort((a, b) => b.score - a.score)
+          .slice(0, maxSectionsPerStandard)
+          .map(({ score, ...sec }) => sec);
+      } catch (error) {
+        entry.detail_error = error.message;
+      }
+    }
+    evidence.push(entry);
+  }
+  return evidence;
+}
+
+function searchManualEvidence(query, { document = "전체", maxResults = 3 } = {}) {
+  const keywords = keywordsFrom(query);
+  const targets = document === "전체" ? Object.keys(referenceDocs) : [document].filter((d) => referenceDocs[d]);
+  const results = [];
+  for (const docName of targets) {
+    for (const sec of referenceDocs[docName] || []) {
+      const score = scoreText(`${sec.title}\n${sec.content}`, keywords);
+      if (score > 0) {
+        results.push({
+          source_type: "design_manual_commentary",
+          document: `${docName}설계기준 해설편`,
+          section: sec.title,
+          quote: compactText(sec.content, 420),
+          relevance_score: score,
+        });
+      }
+    }
+  }
+  return results.sort((a, b) => b.relevance_score - a.relevance_score).slice(0, maxResults);
+}
+
+function lawEvidenceFromSearch(data) {
+  const search = data?.LawSearch;
+  return extractList(search, "law").map((law) => ({
+    source_type: "law_search_result",
+    title: law["법령명한글"] || "",
+    law_type: law["법령구분명"] || "",
+    effective_date: law["시행일자"] || "",
+    ministry: law["소관부처명"] || "",
+    note: "조문 단위 판단 전 법령 본문/조문 상세 확인 필요",
+  }));
+}
+
+function adminEvidenceFromSearch(data) {
+  const search = data?.AdminRulSearch || data?.LawSearch;
+  return extractList(search, "admrul").map((item) => ({
+    source_type: "admin_rule_search_result",
+    title: item["행정규칙명"] || "",
+    rule_type: item["행정규칙구분"] || "",
+    issued_date: item["발령일자"] || "",
+    agency: item["발령기관명"] || item["발령기관"] || "",
+    note: "고시·예규·훈령·지침 본문 확인 후 보조/직접 근거 여부 판단 필요",
+  }));
+}
+
+function interpretationEvidenceFromSearch(data) {
+  const search = data?.InterpSearch || data?.LawSearch;
+  return extractList(search, "interp", "expc").map((item) => ({
+    source_type: "interpretation_search_result",
+    title: item["해석례명"] || item["사건명"] || item.title || "",
+    reply_date: item["회신일자"] || "",
+    agency: item["회신기관명"] || item["회신기관"] || "",
+    summary: compactText(item["질의요지"] || item["요지"] || "", 260),
+    note: "사안 유사성 검토 후 적용 가능",
+  }));
 }
 
 const server = new McpServer({ name: "korean-engineering-mcp", version: "1.0.0" });
@@ -397,6 +544,73 @@ server.tool(
 );
 
 
+server.tool(
+  "grounded_engineering_research",
+  "한국 엔지니어링 답변 전 반드시 사용할 근거 패키지 생성 도구. 법령·행정규칙·해석례·KDS/KCS·설계기준 해설편을 우선 검색하고, 최종 답변은 반환된 근거와 한계 안에서만 작성해야 합니다. 근거가 부족하면 단정하지 말고 '근거 불충분'으로 표시하세요.",
+  {
+    question: z.string().describe("검토할 엔지니어링 질문"),
+    standard_query: z.string().optional().describe("건설기준 검색어. 생략 시 question 사용"),
+    law_query: z.string().optional().describe("법령/행정규칙 검색어. 생략 시 question 사용"),
+    include_local_standards: z.boolean().default(false).describe("SMCS/LHCS 등 기관·지자체 기준까지 포함할지 여부. 기본은 KDS/KCS 우선"),
+    max_evidence: z.number().default(8).describe("토큰 절감을 위한 최대 근거 항목 수"),
+    compact: z.boolean().default(true).describe("짧은 인용문 중심으로 반환하여 모델 토큰 사용량 최소화"),
+  },
+  async ({ question, standard_query, law_query, include_local_standards, max_evidence, compact }) => {
+    const sq = standard_query || question;
+    const lq = law_query || question;
+    const maxItems = Math.max(3, Math.min(Number(max_evidence) || 8, 20));
+
+    const [standardsRes, lawsRes, interpRes, adminRes] = await Promise.allSettled([
+      findStandardEvidence(sq, { includeLocalStandards: include_local_standards, maxStandards: Math.min(4, maxItems), maxSectionsPerStandard: compact ? 2 : 4 }),
+      fetchLaw("lawSearch.do", { target: "law", query: lq, display: Math.min(5, maxItems) }),
+      fetchLaw("lawSearch.do", { target: "expc", query: lq, display: Math.min(3, maxItems) }),
+      fetchLaw("lawSearch.do", { target: "admrul", query: lq, display: Math.min(3, maxItems) }),
+    ]);
+
+    const standards = standardsRes.status === "fulfilled" ? standardsRes.value : [];
+    const laws = lawsRes.status === "fulfilled" ? lawEvidenceFromSearch(lawsRes.value).slice(0, 3) : [];
+    const interpretations = interpRes.status === "fulfilled" ? interpretationEvidenceFromSearch(interpRes.value).slice(0, 2) : [];
+    const adminRules = adminRes.status === "fulfilled" ? adminEvidenceFromSearch(adminRes.value).slice(0, 2) : [];
+    const manuals = searchManualEvidence(sq, { document: "전체", maxResults: 3 });
+
+    const directStandardSections = standards.reduce((n, item) => n + (item.sections?.length || 0), 0);
+    const evidenceCount = standards.length + laws.length + interpretations.length + adminRules.length + manuals.length;
+    const evidenceStatus = evidenceCount === 0
+      ? "insufficient"
+      : directStandardSections || laws.length || adminRules.length
+        ? "partial"
+        : "weak";
+
+    const payload = {
+      question,
+      evidence_status: evidenceStatus,
+      answer_policy: [
+        "법령·시행령·시행규칙 > 행정규칙/고시 > KDS/KCS > 설계기준 해설편 > 기관/지자체 기준 > 실무 관행 순으로 판단하세요.",
+        "아래 근거에 없는 사항은 단정하지 말고 '직접 근거 미확인' 또는 '추가 확인 필요'로 표시하세요.",
+        "근거자료를 나열하는 데 그치지 말고, 각 근거의 법적/기술적 효력과 질문 적용성을 종합해 결론을 내리세요.",
+        "최종 답변에는 출처 유형, 법령명 또는 KDS/KCS 코드, 조문/절 제목, 시행일/개정일, 핵심 인용문을 명기하세요."
+      ],
+      source_hierarchy: ["법률·시행령·시행규칙", "행정규칙·고시·지침", "KDS 설계기준", "KCS 표준시방서", "상·하수도 설계기준 해설편", "기관·지자체 기준", "실무 관행"],
+      evidence: {
+        laws,
+        admin_rules: adminRules,
+        interpretations,
+        standards,
+        design_manual_commentary: manuals,
+      },
+      gaps: [],
+      required_final_answer_format: ["결론", "쟁점", "확인 근거", "종합 판단", "실무 적용", "한계/추가 확인 필요사항"],
+    };
+
+    if (!standards.length) payload.gaps.push(`'${sq}'에 대한 KDS/KCS 직접 후보가 부족합니다. 동의어·상위개념으로 재검색하세요.`);
+    if (!laws.length && !adminRules.length) payload.gaps.push(`'${lq}'에 대한 법령/행정규칙 후보가 부족합니다. 법령명 또는 제도명으로 재검색하세요.`);
+    if (standards.some((s) => !s.sections?.length)) payload.gaps.push("일부 기준은 상세 절 인용이 없어 원문 상세조회로 조문/절을 보강해야 합니다.");
+
+    return { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }] };
+  }
+);
+
+
 // ══════════════════════════════════════════════════════════════
 // 로컬 설계기준 해설편 검색 (파일이 있을 때만 등록)
 // ══════════════════════════════════════════════════════════════
@@ -430,7 +644,7 @@ if (availableDocs.length > 0) {
           .map((sec) => {
             const text = `${sec.title}\n${sec.content}`;
             const score = keywords.reduce((s, kw) => {
-              const matches = (text.match(new RegExp(kw, "g")) || []).length;
+              const matches = (text.match(new RegExp(escapeRegExp(kw), "g")) || []).length;
               return s + matches;
             }, 0);
             return { docName, ...sec, score };

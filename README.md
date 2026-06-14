@@ -1,67 +1,45 @@
 # korean-engineering-mcp
 
-한국 **건설기준(KDS/KCS)**과 **법제처 법령**을 통합 검색하여 엔지니어링 질문에 법적·기술적 근거를 종합 제공하는 MCP 서버입니다.
+한국 **건설기준(KDS/KCS)**, **법제처 법령**, **행정규칙·해석례**, 선택적 **상·하수도 설계기준 해설편**을 검색해 엔지니어링 답변용 근거 패키지를 생성하는 MCP 서버입니다.
 
-## 제공 도구 (7개)
+이 레포는 직원들이 Claude, OpenClaw, Hermes, Antigravity, VS Code 계열 AI 도구 등 다양한 클라이언트에서 함께 쓰는 것을 전제로 합니다.
 
-| 분류 | 도구명 | 설명 |
-|------|--------|------|
-| 건설기준 | `search_standards` | KDS/KCS 키워드 검색 |
-| 건설기준 | `get_standard_detail` | 특정 기준 본문 조회 |
-| 건설기준 | `list_standard_categories` | 분야별 기준 목록 |
-| 법령 | `search_laws` | 법률·시행령·시행규칙 검색 |
-| 법령 | `search_interpretations` | 법령 해석례 검색 |
-| 법령 | `search_admin_rules` | 고시·예규·훈령·지침 검색 |
-| **통합** | **`comprehensive_research`** | **법령 + 건설기준 동시 검색** |
-| 해설편 | `search_design_manual` | 로컬 설계기준 해설편 키워드 검색 (파일 보유 시) |
+## 핵심 설계
 
----
+- **MCP server**: 법령/기준/해설편을 검색하고 근거를 구조화합니다.
+- **Skill package**: `skills/korean-engineering-grounded-answer`가 답변 정책을 강제합니다.
+- **Token-minimizing default**: `grounded_engineering_research`는 짧은 인용문과 제한된 근거 수를 기본으로 반환합니다.
+- **Anti-hallucination**: 근거가 부족하면 단정하지 않고 `근거 불충분` 또는 `직접 근거 미확인`으로 답변하도록 유도합니다.
 
-## 사전 준비: API 키 발급
+## 제공 도구
 
-### 1. KCSC API 키 (국가건설기준센터)
+- `grounded_engineering_research` — 답변 전 우선 사용할 근거 패키지 생성 도구
+- `search_standards` — KDS/KCS 등 건설기준 키워드 검색
+- `get_standard_detail` — 특정 KDS/KCS 기준 본문 조회
+- `list_standard_categories` — 분야별 기준 목록
+- `search_laws` — 법률·시행령·시행규칙 검색
+- `search_interpretations` — 법령 해석례 검색
+- `search_admin_rules` — 고시·예규·훈령·지침 검색
+- `comprehensive_research` — 법령 + 건설기준 동시 검색
+- `search_design_manual` — 로컬 설계기준 해설편 키워드 검색. `REFERENCE_DIR`에 파일이 있을 때만 등록됩니다.
 
-1. [https://www.kcsc.re.kr](https://www.kcsc.re.kr) 접속
-2. 회원가입 후 **OpenAPI** 메뉴에서 API 키 신청
-3. 발급된 키를 `KCSC_API_KEY`로 사용
+## 사전 준비
 
-### 2. 법제처 API 키 (OC 인증키)
+API 키는 환경변수로만 주입하세요. 공개 레포나 공유 채팅에 실제 키를 넣지 마세요.
 
-1. [https://open.law.go.kr](https://open.law.go.kr) 접속
-2. 회원가입 후 **오픈API** → **인증키 신청**
-3. 발급된 OC 값을 `LAW_API_KEY`로 사용
+- KCSC API 키: https://www.kcsc.re.kr
+- 법제처 OC 인증키: https://open.law.go.kr
 
----
-
-## 설치 방법
-
-### Claude Code (CLI)
-
-기본 설치:
 ```bash
-claude mcp add korean-engineering-mcp \
-  -e KCSC_API_KEY=여기에_KCSC_키_입력 \
-  -e LAW_API_KEY=여기에_법제처_키_입력 \
-  -- npx -y github:sonmeggy/korean-engineering-mcp
+cp .env.example .env
+# .env에 KCSC_API_KEY, LAW_API_KEY를 입력
 ```
 
-설계기준 해설편 파일 보유 시 (`REFERENCE_DIR` 추가):
-```bash
-claude mcp add korean-engineering-mcp \
-  -e KCSC_API_KEY=여기에_KCSC_키_입력 \
-  -e LAW_API_KEY=여기에_법제처_키_입력 \
-  -e REFERENCE_DIR=해설편_파일이_있는_폴더_경로 \
-  -- npx -y github:sonmeggy/korean-engineering-mcp
-```
+## 설치 개요
 
-재시작 없이 현재 세션에 즉시 추가됩니다.
+자세한 도구별 설치법은 [docs/INSTALLATION.md](docs/INSTALLATION.md)를 보세요.
 
-### Claude Desktop
-
-`claude_desktop_config.json` 파일에 아래 내용 추가:
-
-- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
-- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+### Generic MCP JSON
 
 ```json
 {
@@ -70,44 +48,57 @@ claude mcp add korean-engineering-mcp \
       "command": "npx",
       "args": ["-y", "github:sonmeggy/korean-engineering-mcp"],
       "env": {
-        "KCSC_API_KEY": "여기에_KCSC_키_입력",
-        "LAW_API_KEY": "여기에_법제처_키_입력",
-        "REFERENCE_DIR": "해설편_파일이_있는_폴더_경로 (선택사항)"
+        "KCSC_API_KEY": "${KCSC_API_KEY}",
+        "LAW_API_KEY": "${LAW_API_KEY}",
+        "REFERENCE_DIR": "${REFERENCE_DIR}"
       }
     }
   }
 }
 ```
 
-### 기타 MCP 호환 클라이언트
+### Claude Code
 
-동일한 설정 형식을 사용합니다:
-- **command**: `npx`
-- **args**: `["-y", "korean-engineering-mcp"]`
-- **env**: 위 두 API 키 설정
-
----
-
-## 사용 예시
-
-```
-comprehensive_research("배수지 산지 진출입로 경사 기준")
-→ KDS 442010, 도로의 구조·시설 기준에 관한 규칙 제25조 등 동시 검색
-
-comprehensive_research("하수도 기술진단 자격")
-→ 하수도법 시행령, 관련 해석례, KDS 기준 동시 검색
+```bash
+claude mcp add korean-engineering-mcp \
+  -e KCSC_API_KEY=*** \
+  -e LAW_API_KEY=*** \
+  -e REFERENCE_DIR="$REFERENCE_DIR" \
+  -- npx -y github:sonmeggy/korean-engineering-mcp
 ```
 
----
+### Hermes skill + MCP
 
-## Node.js 요구사항
+```bash
+./install/install-hermes.sh
+```
 
-Node.js 18 이상
+그 뒤 MCP 서버를 Hermes MCP 설정에 추가하세요. Hermes 외 도구는 `skills/korean-engineering-grounded-answer/SKILL.md` 내용을 해당 도구의 skill/rule/instruction 위치에 복사하면 됩니다.
 
----
+## 답변 정책
 
-## 참고 및 감사
+직원들이 사용하는 모델의 토큰 사용량과 할루시네이션을 줄이기 위해 다음 원칙을 권장합니다.
 
-법제처 API 연동 방식은 아래 프로젝트를 참고했습니다.
+1. 최종 답변 전 `grounded_engineering_research`를 먼저 호출합니다.
+2. 기본 `max_evidence`는 5~8로 유지합니다.
+3. 상세 본문은 상위 1~3개 후보만 추가 조회합니다.
+4. 최종 답변은 근거 나열이 아니라 `결론 → 근거 → 종합 판단 → 실무 적용 → 한계` 순서로 작성합니다.
+5. 근거가 부족하면 단정하지 않고 `근거 불충분`으로 표시합니다.
 
-- [korean-law-mcp](https://github.com/chrisryugj/korean-law-mcp) by [@chrisryugj](https://github.com/chrisryugj) — 법제처 Open API 기반 한국 법령 검색 MCP 서버
+## 개발
+
+```bash
+npm install
+npm run check
+npm test
+```
+
+## 보안
+
+- 실제 API 키를 커밋하지 마세요.
+- `.env.example`만 공유하세요.
+- 법령/기준 검색 결과는 답변 근거 후보이며, 중요한 실무 판단 전에는 원문 조문/절을 확인하세요.
+
+## License
+
+MIT
