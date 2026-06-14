@@ -11,8 +11,12 @@ test('does not ship a hard-coded LAW API key fallback', () => {
   assert.match(index, /const LAW_KEY\s*=\s*process\.env\.LAW_API_KEY\s*\|\|\s*""/);
 });
 
-test('provides grounded research tool and answer policy', () => {
+test('provides grounded research and citation-detail tools', () => {
   assert.match(index, /grounded_engineering_research/);
+  assert.match(index, /get_law_detail/);
+  assert.match(index, /get_admin_rule_detail/);
+  assert.match(index, /law_details/);
+  assert.match(index, /admin_rule_details/);
   assert.match(index, /evidence_status/);
   assert.match(index, /source_hierarchy/);
   assert.match(index, /근거 불충분|직접 근거 미확인/);
@@ -28,5 +32,7 @@ test('skill enforces evidence-first and citation-first answers', () => {
 test('README documents MCP plus skill installation', () => {
   assert.match(readme, /MCP server/);
   assert.match(readme, /Skill package/);
+  assert.match(readme, /AGENT_INSTALL\.md/);
+  assert.match(readme, /setup-interactive\.sh/);
   assert.match(readme, /docs\/INSTALLATION\.md/);
 });

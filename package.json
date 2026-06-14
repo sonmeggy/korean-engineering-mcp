@@ -11,6 +11,7 @@
     "skills/",
     "docs/",
     "install/",
+    "AGENT_INSTALL.md",
     ".env.example",
     "LICENSE"
   ],

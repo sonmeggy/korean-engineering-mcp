@@ -208,26 +208,39 @@ function searchManualEvidence(query, { document = "전체", maxResults = 3 } = {
 
 function lawEvidenceFromSearch(data) {
   const search = data?.LawSearch;
-  return extractList(search, "law").map((law) => ({
-    source_type: "law_search_result",
-    title: law["법령명한글"] || "",
-    law_type: law["법령구분명"] || "",
-    effective_date: law["시행일자"] || "",
-    ministry: law["소관부처명"] || "",
-    note: "조문 단위 판단 전 법령 본문/조문 상세 확인 필요",
-  }));
+  return extractList(search, "law").map((law) => {
+    const mst = law["법령일련번호"] || "";
+    return {
+      source_type: "law_search_result",
+      title: law["법령명한글"] || "",
+      law_type: law["법령구분명"] || "",
+      mst,
+      law_id: law["법령ID"] || "",
+      effective_date: law["시행일자"] || "",
+      ministry: law["소관부처명"] || "",
+      url: lawDetailUrl(mst),
+      note: "조문 단위 판단 전 법령 본문/조문 상세 확인 필요",
+    };
+  });
 }
 
 function adminEvidenceFromSearch(data) {
-  const search = data?.AdminRulSearch || data?.LawSearch;
-  return extractList(search, "admrul").map((item) => ({
-    source_type: "admin_rule_search_result",
-    title: item["행정규칙명"] || "",
-    rule_type: item["행정규칙구분"] || "",
-    issued_date: item["발령일자"] || "",
-    agency: item["발령기관명"] || item["발령기관"] || "",
-    note: "고시·예규·훈령·지침 본문 확인 후 보조/직접 근거 여부 판단 필요",
-  }));
+  const search = data?.AdmRulSearch || data?.AdminRulSearch || data?.LawSearch;
+  return extractList(search, "admrul").map((item) => {
+    const id = item["행정규칙일련번호"] || "";
+    return {
+      source_type: "admin_rule_search_result",
+      title: item["행정규칙명"] || "",
+      rule_type: item["행정규칙종류"] || item["행정규칙구분"] || "",
+      id,
+      admin_rule_id: item["행정규칙ID"] || "",
+      effective_date: item["시행일자"] || "",
+      issued_date: item["발령일자"] || "",
+      agency: item["소관부처명"] || item["발령기관명"] || item["발령기관"] || "",
+      url: adminRuleDetailUrl(id),
+      note: "고시·예규·훈령·지침 본문 확인 후 보조/직접 근거 여부 판단 필요",
+    };
+  });
 }
 
 function interpretationEvidenceFromSearch(data) {
@@ -240,6 +253,82 @@ function interpretationEvidenceFromSearch(data) {
     summary: compactText(item["질의요지"] || item["요지"] || "", 260),
     note: "사안 유사성 검토 후 적용 가능",
   }));
+}
+
+function asArray(value) {
+  if (!value) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function lawDetailUrl(mst) {
+  return mst ? `${LAW_BASE}/lawService.do?target=law&MST=${encodeURIComponent(mst)}&type=HTML` : LAW_BASE;
+}
+
+function adminRuleDetailUrl(id) {
+  return id ? `${LAW_BASE}/lawService.do?target=admrul&ID=${encodeURIComponent(id)}&type=HTML` : LAW_BASE;
+}
+
+function normalizeLawArticles(lawDetail, keyword = "", maxArticles = 8) {
+  const law = lawDetail?.["법령"] || lawDetail;
+  const info = law?.["기본정보"] || {};
+  const articles = asArray(law?.["조문"]?.["조문단위"]);
+  const keywords = keywordsFrom(keyword);
+  return articles
+    .map((article) => {
+      const paragraphs = asArray(article["항"]);
+      const paragraphText = paragraphs.map((p) => {
+        const ho = asArray(p?.["호"]).map((h) => h?.["호내용"] || "").filter(Boolean).join(" ");
+        return [p?.["항내용"], ho].filter(Boolean).join(" ");
+      }).filter(Boolean).join(" ");
+      const text = [article["조문내용"], paragraphText].filter(Boolean).join(" ");
+      return {
+        article_number: article["조문번호"] || "",
+        article_title: article["조문제목"] || "",
+        effective_date: article["조문시행일자"] || info["시행일자"] || "",
+        quote: compactText(text, 700),
+        score: keywords.length ? scoreText(`${article["조문번호"] || ""} ${article["조문제목"] || ""} ${text}`, keywords) : 1,
+      };
+    })
+    .filter((a) => a.quote && (!keywords.length || a.score > 0))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, maxArticles)
+    .map(({ score, ...a }) => a);
+}
+
+function normalizeAdminRuleArticles(detail, keyword = "", maxArticles = 8) {
+  const root = detail?.AdmRulService || detail;
+  const basic = root?.기본정보 || {};
+  const jo = asArray(root?.조문?.조문단위 || root?.조문단위);
+  const annex = asArray(root?.별표?.별표단위);
+  const keywords = keywordsFrom(keyword);
+  const articleItems = jo.map((article) => {
+    const text = [article["조문내용"], article["항내용"]].filter(Boolean).join(" ");
+    return {
+      source_part: "조문",
+      article_number: article["조문번호"] || "",
+      article_title: article["조문제목"] || "",
+      effective_date: article["조문시행일자"] || basic["시행일자"] || "",
+      quote: compactText(text, 700),
+      score: keywords.length ? scoreText(`${article["조문번호"] || ""} ${article["조문제목"] || ""} ${text}`, keywords) : 1,
+    };
+  });
+  const annexItems = annex.map((item) => {
+    const content = Array.isArray(item["별표내용"]) ? item["별표내용"].flat(Infinity).join(" ") : item["별표내용"];
+    const text = [item["별표제목"], content].filter(Boolean).join(" ");
+    return {
+      source_part: "별표",
+      article_number: item["별표번호"] || "",
+      article_title: item["별표제목"] || "",
+      effective_date: basic["시행일자"] || "",
+      quote: compactText(text, 700),
+      score: keywords.length ? scoreText(text, keywords) : 1,
+    };
+  });
+  return [...articleItems, ...annexItems]
+    .filter((a) => a.quote && (!keywords.length || a.score > 0))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, maxArticles)
+    .map(({ score, ...a }) => a);
 }
 
 const server = new McpServer({ name: "korean-engineering-mcp", version: "1.0.0" });
@@ -369,8 +458,11 @@ server.tool(
     const lines = [`법령 검색결과: '${query}' (총 ${total}건)\n`];
     for (const law of laws) {
       const name = law["법령명한글"] || "";
+      const mst = law["법령일련번호"] || "";
       lines.push(`■ ${name}`);
       lines.push(`  종류: ${law["법령구분명"] || ""} | 시행: ${law["시행일자"] || ""} | 소관: ${law["소관부처명"] || ""}`);
+      lines.push(`  법령ID: ${law["법령ID"] || ""} | MST: ${mst}`);
+      lines.push(`  원문: ${lawDetailUrl(mst)}`);
       lines.push("");
     }
     return { content: [{ type: "text", text: lines.join("\n") }] };
@@ -413,18 +505,81 @@ server.tool(
   },
   async ({ query, display }) => {
     const data = await fetchLaw("lawSearch.do", { target: "admrul", query, display });
-    const search = data?.AdminRulSearch || data?.LawSearch;
+    const search = data?.AdmRulSearch || data?.AdminRulSearch || data?.LawSearch;
     const items = extractList(search, "admrul");
 
     if (!items.length) return { content: [{ type: "text", text: `'${query}' 행정규칙 검색 결과 없음` }] };
 
     const lines = [`행정규칙 검색결과: '${query}' (${items.length}건)\n`];
     for (const item of items) {
+      const id = item["행정규칙일련번호"] || "";
       lines.push(`■ ${item["행정규칙명"] || ""}`);
-      lines.push(`  종류: ${item["행정규칙구분"] || ""} | 발령: ${item["발령일자"] || ""} | 기관: ${item["발령기관명"] || item["발령기관"] || ""}`);
+      lines.push(`  종류: ${item["행정규칙종류"] || item["행정규칙구분"] || ""} | 시행: ${item["시행일자"] || ""} | 발령: ${item["발령일자"] || ""} | 기관: ${item["소관부처명"] || item["발령기관명"] || item["발령기관"] || ""}`);
+      lines.push(`  행정규칙ID: ${item["행정규칙ID"] || ""} | 일련번호: ${id}`);
+      lines.push(`  원문: ${adminRuleDetailUrl(id)}`);
       lines.push("");
     }
     return { content: [{ type: "text", text: lines.join("\n") }] };
+  }
+);
+
+
+server.tool(
+  "get_law_detail",
+  "법제처 법령 상세 조회. search_laws 결과의 MST(법령일련번호)를 넣으면 조문 단위 근거와 핵심 인용문을 반환합니다.",
+  {
+    mst: z.string().describe("법령일련번호(MST). search_laws 결과의 MST 값을 사용"),
+    keyword: z.string().optional().describe("조문 필터링 키워드. 예: 기술진단, 배수설비, 공공하수도"),
+    max_articles: z.number().default(8).describe("토큰 절감을 위한 최대 조문 수"),
+  },
+  async ({ mst, keyword, max_articles }) => {
+    const detail = await fetchLaw("lawService.do", { target: "law", MST: mst });
+    const law = detail?.["법령"] || {};
+    const info = law?.["기본정보"] || {};
+    const payload = {
+      source_type: "law_detail",
+      title: info["법령명_한글"] || "",
+      law_type: info["법종구분"]?.["content"] || info["법종구분"] || "",
+      mst,
+      law_id: info["법령ID"] || "",
+      promulgation_number: info["공포번호"] || "",
+      promulgation_date: info["공포일자"] || "",
+      effective_date: info["시행일자"] || "",
+      ministry: info["소관부처"]?.["content"] || info["소관부처"] || "",
+      url: lawDetailUrl(mst),
+      articles: normalizeLawArticles(detail, keyword || "", Math.max(1, Math.min(Number(max_articles) || 8, 20))),
+      citation_note: "최종 답변에는 법령명, 조문번호/제목, 시행일, 핵심 인용문을 함께 표시하세요.",
+    };
+    return { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }] };
+  }
+);
+
+server.tool(
+  "get_admin_rule_detail",
+  "법제처 행정규칙 상세 조회. search_admin_rules 결과의 일련번호를 넣으면 조문/별표 단위 근거와 핵심 인용문을 반환합니다.",
+  {
+    id: z.string().describe("행정규칙 일련번호. search_admin_rules 결과의 일련번호 값을 사용"),
+    keyword: z.string().optional().describe("조문/별표 필터링 키워드"),
+    max_articles: z.number().default(8).describe("토큰 절감을 위한 최대 조문/별표 수"),
+  },
+  async ({ id, keyword, max_articles }) => {
+    const detail = await fetchLaw("lawService.do", { target: "admrul", ID: id });
+    const root = detail?.AdmRulService || {};
+    const info = root?.기본정보 || {};
+    const payload = {
+      source_type: "admin_rule_detail",
+      title: info["행정규칙명"] || info["행정규칙명_한글"] || "",
+      rule_type: info["행정규칙종류"] || "",
+      id,
+      issue_number: info["발령번호"] || "",
+      issue_date: info["발령일자"] || "",
+      effective_date: info["시행일자"] || "",
+      agency: info["소관부처"]?.["content"] || info["소관부처명"] || "",
+      url: adminRuleDetailUrl(id),
+      articles: normalizeAdminRuleArticles(detail, keyword || "", Math.max(1, Math.min(Number(max_articles) || 8, 20))),
+      citation_note: "최종 답변에는 행정규칙명, 조문/별표 제목, 시행일 또는 발령일, 핵심 인용문을 함께 표시하세요.",
+    };
+    return { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }] };
   }
 );
 
@@ -522,7 +677,7 @@ server.tool(
     // ── 4. 행정규칙 (고시·예규·지침) ──
     lines.push("▶ [행정규칙 (고시·예규·지침)]");
     if (adminRes.status === "fulfilled") {
-      const search = adminRes.value?.AdminRulSearch || adminRes.value?.LawSearch;
+      const search = adminRes.value?.AdmRulSearch || adminRes.value?.AdminRulSearch || adminRes.value?.LawSearch;
       const items = extractList(search, "admrul");
       if (items.length) {
         for (const item of items) {
@@ -572,6 +727,25 @@ server.tool(
     const interpretations = interpRes.status === "fulfilled" ? interpretationEvidenceFromSearch(interpRes.value).slice(0, 2) : [];
     const adminRules = adminRes.status === "fulfilled" ? adminEvidenceFromSearch(adminRes.value).slice(0, 2) : [];
     const manuals = searchManualEvidence(sq, { document: "전체", maxResults: 3 });
+    const law_details = [];
+    const admin_rule_details = [];
+
+    if (laws[0]?.mst) {
+      try {
+        const detail = await fetchLaw("lawService.do", { target: "law", MST: laws[0].mst });
+        law_details.push({ ...laws[0], articles: normalizeLawArticles(detail, lq, compact ? 3 : 6) });
+      } catch (error) {
+        law_details.push({ ...laws[0], detail_error: error.message });
+      }
+    }
+    if (adminRules[0]?.id) {
+      try {
+        const detail = await fetchLaw("lawService.do", { target: "admrul", ID: adminRules[0].id });
+        admin_rule_details.push({ ...adminRules[0], articles: normalizeAdminRuleArticles(detail, lq, compact ? 3 : 6) });
+      } catch (error) {
+        admin_rule_details.push({ ...adminRules[0], detail_error: error.message });
+      }
+    }
 
     const directStandardSections = standards.reduce((n, item) => n + (item.sections?.length || 0), 0);
     const evidenceCount = standards.length + laws.length + interpretations.length + adminRules.length + manuals.length;
@@ -593,7 +767,9 @@ server.tool(
       source_hierarchy: ["법률·시행령·시행규칙", "행정규칙·고시·지침", "KDS 설계기준", "KCS 표준시방서", "상·하수도 설계기준 해설편", "기관·지자체 기준", "실무 관행"],
       evidence: {
         laws,
+        law_details,
         admin_rules: adminRules,
+        admin_rule_details,
         interpretations,
         standards,
         design_manual_commentary: manuals,

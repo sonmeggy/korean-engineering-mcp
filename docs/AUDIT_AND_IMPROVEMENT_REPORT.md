@@ -28,10 +28,18 @@
 - `install/install-hermes.sh` 추가
 - `.env.example`, `LICENSE`, package metadata, check/test scripts 추가
 
+## 2차 개선 추가 적용
+
+- `get_law_detail` 추가: `search_laws` 결과의 MST로 법령 상세를 조회하고 조문 단위 인용문을 compact JSON으로 반환
+- `get_admin_rule_detail` 추가: 행정규칙 일련번호로 조문/별표 단위 근거를 compact JSON으로 반환
+- `grounded_engineering_research`가 상위 법령/행정규칙 후보의 상세 조문·별표 근거를 함께 담도록 개선
+- `AGENT_INSTALL.md` 추가: 직원이 AI 도구에 GitHub URL과 “설치해줘”만 전달해도 에이전트가 따라갈 설치 절차 제공
+- `install/setup-interactive.sh` 추가: client type, API key, optional reference path를 대화형으로 입력받아 설치 안내/등록 수행
+- `.github/workflows/ci.yml` 추가: Node 20/22에서 check/test/audit 실행
+
 ## 남은 권장 작업
 
-- 법제처 조문 상세 조회 도구 추가: 검색 결과 제목만으로는 조문 근거가 부족함
 - KCSC 상세 본문 인용 정확도 개선: 절 번호, 항 번호, 원문 링크의 안정성 강화 필요
-- mock 기반 테스트 추가: 외부 API 없이 CI에서 파싱/스키마 검증
-- GitHub Actions 추가
+- 법제처 조문 상세 조회의 다양한 법령 구조 fixture 추가
+- mock 기반 테스트 추가: 외부 API 없이 CI에서 파싱/스키마 검증 확대
 - npm 배포 여부 결정: npm 배포 전까지는 `github:sonmeggy/korean-engineering-mcp` 설치 방식을 공식 경로로 유지

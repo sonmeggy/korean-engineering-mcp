@@ -14,6 +14,23 @@ Use both layers when your client supports them. If a client supports MCP but not
 - Antigravity: MCP-compatible configuration is expected; skills may be installed under the Antigravity/Gemini skill directory when available, or copied as project instructions.
 - VS Code / GitHub Copilot / Cline / Cursor-style tools: use MCP if the extension supports MCP. If no formal skill mechanism exists, copy `skills/korean-engineering-grounded-answer/SKILL.md` into workspace instructions such as `.github/copilot-instructions.md` or the extension's rule/instruction file.
 
+
+## URL-only install request for employees
+
+Employees can give the repository URL to their AI tool and say only:
+
+```text
+https://github.com/sonmeggy/korean-engineering-mcp 설치해줘
+```
+
+The installing agent should read `AGENT_INSTALL.md`, clone the repository, run `./install/setup-interactive.sh` when shell access is available, and ask the employee for:
+
+- `KCSC_API_KEY`
+- `LAW_API_KEY`
+- optional `REFERENCE_DIR`
+
+The installer must not echo the key values back to chat.
+
 ## Minimal MCP command
 
 ```bash
