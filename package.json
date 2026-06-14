@@ -1,14 +1,32 @@
 {
   "name": "korean-engineering-mcp",
-  "version": "1.0.0",
-  "description": "한국 건설기준(KDS/KCS)과 법제처 법령을 통합 검색하는 MCP 서버",
+  "version": "1.1.0",
+  "description": "한국 건설기준(KDS/KCS)과 법제처 법령을 통합 검색하고 근거 패키지를 생성하는 MCP 서버",
   "type": "module",
   "bin": {
     "korean-engineering-mcp": "./index.js"
   },
   "files": [
-    "index.js"
+    "index.js",
+    "skills/",
+    "docs/",
+    "install/",
+    "AGENT_INSTALL.md",
+    ".env.example",
+    "LICENSE"
   ],
+  "scripts": {
+    "check": "node --check index.js",
+    "test": "node --test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sonmeggy/korean-engineering-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sonmeggy/korean-engineering-mcp/issues"
+  },
+  "homepage": "https://github.com/sonmeggy/korean-engineering-mcp#readme",
   "keywords": [
     "mcp",
     "korean",
@@ -16,8 +34,12 @@
     "construction",
     "KDS",
     "KCS",
+    "law",
+    "citation",
+    "grounded-answer",
     "법령",
-    "건설기준"
+    "건설기준",
+    "설계기준"
   ],
   "license": "MIT",
   "dependencies": {
