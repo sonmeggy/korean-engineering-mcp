@@ -2,12 +2,12 @@
 
 한국 **건설기준(KDS/KCS)**, **법제처 법령**, **행정규칙·해석례**, 선택적 **상·하수도 설계기준 해설편**을 검색해 엔지니어링 답변용 근거 패키지를 생성하는 MCP 서버입니다.
 
-이 레포는 Claude, OpenClaw, Hermes, Antigravity, VS Code 계열 AI 도구 등 다양한 클라이언트에서 함께 쓰는 것을 고려합니다..
+이 레포는 Claude, Hermes, OpenClaw AI 도구 등 다양한 클라이언트에서 함께 쓰는 것을 고려합니다..
 
 
 ## AI 도구에 URL만 주고 설치하기
 
-Claude/OpenClaw/Hermes/Antigravity/VS Code 계열 AI 도구에 아래처럼 말하면 됩니다.
+Claude/Hermes/OpenClaw 등 계열 AI 도구에 아래처럼 말하면 됩니다.
 
 ```text
 https://github.com/sonmeggy/korean-engineering-mcp 설치해줘
@@ -116,8 +116,6 @@ npm test
 
 ## 보안
 
-- 실제 API 키를 커밋하지 마세요.
-- `.env.example`만 공유하세요.
 - 법령/기준 검색 결과는 답변 근거 후보이며, 중요한 실무 판단 전에는 원문 조문/절을 확인하세요.
 
 ## License
