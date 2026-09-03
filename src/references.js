@@ -201,10 +201,12 @@ export function searchReferenceDocuments(documents, query, options = {}) {
     for (const section of doc.sections || []) {
       const text = `${section.title}\n${section.content}`;
       const keywordScore = keywords.reduce((score, keyword) => score + countOccurrences(text, keyword), 0);
+      // 분야 일치는 순위 조정에만 사용한다. 검색어가 실제로 등장하지 않는 절까지
+      // domainBoost만으로 통과시키면 완전 불일치 검색에도 무관한 절이 반환된다.
+      if (keywordScore <= 0) continue;
       const domainBoost = docDomainKeys.some((key) => domainKeys.has(key)) ? 2 : 0;
       const titleBoost = keywords.some((keyword) => String(section.title).includes(keyword)) ? 3 : 0;
       const score = keywordScore + domainBoost + titleBoost;
-      if (score <= 0) continue;
       results.push({
         source_type: "local_reference_document",
         trust_level: "local_reference_unverified",
