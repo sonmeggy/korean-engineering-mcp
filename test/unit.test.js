@@ -652,6 +652,30 @@ test('본문의 # 로 시작하는 표 행을 마크다운 헤딩으로 오인�
   assert.doesNotMatch(docs[0].title, /분 ?기 ?기/, '분기기 표 행이 문서 제목이 되면 안 된다');
 });
 
+test('표준품셈 검색어가 어느 절에도 없으면 빈 결과를 반환한다', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'kemcp-est-no-match-'));
+  품셈문서(root);
+
+  const docs = await discoverReferenceDocuments(root, { maxFiles: 3, maxBytes: 8 * 1024 * 1024, maxDepth: 1 });
+  const results = searchReferenceDocuments(docs, '존재하지않는검색어', { maxResults: 5 });
+
+  assert.equal(results.length, 0, '분야 가산점만으로 무관한 절을 반환하면 안 된다');
+});
+
+test('표준품셈 검색 결과에는 검색어가 실제로 일치한 절만 포함된다', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'kemcp-est-only-match-'));
+  품셈문서(root);
+
+  const docs = await discoverReferenceDocuments(root, { maxFiles: 3, maxBytes: 8 * 1024 * 1024, maxDepth: 1 });
+  const results = searchReferenceDocuments(docs, '잔디붙임', { maxResults: 5 });
+
+  assert.ok(results.length >= 1, '검색 결과가 있어야 한다');
+  assert.ok(
+    results.every((result) => `${result.section}\n${result.quote}`.includes('잔디붙임')),
+    '검색어가 없는 무관한 절이 결과에 섞이면 안 된다',
+  );
+});
+
 
 // ── 건설기준 검색: 분야 가산점만으로 통과하는 문제 회귀 테스트 ──────
 // '경계석'처럼 어떤 기준 제목에도 없는 낱말로 검색하면 분야 분류가 '공통'으로
