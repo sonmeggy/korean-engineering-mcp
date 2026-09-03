@@ -28,6 +28,11 @@ const {
   sanitizeHtmlFilename,
   writeEngineeringAnswerHtml,
   applyEvidenceBudget,
+  rankStandards,
+  countFlexible,
+  expandSearchTerms,
+  readCodeListDiskCache,
+  writeCodeListDiskCache,
 } = await import('../index.js');
 
 const {
@@ -579,4 +584,187 @@ test('derCertificateToPem wraps base64 DER bytes in a standard PEM certificate b
   assert.match(pem, /^-----BEGIN CERTIFICATE-----\n/);
   assert.match(pem, /\n-----END CERTIFICATE-----\n$/);
   assert.equal(Buffer.from(pem.replace(/-----[^-]+-----/g, '').replace(/\s+/g, ''), 'base64').toString(), der.toString());
+});
+
+// ── 표준품셈(PDF→TXT) 검색 결함 회귀 테스트 ──────────────────────
+// 실제 2026년 표준품셈 원문에서 드러난 결함들. 캐시된 원문은 2MB/49,217행이며
+// 목차(점선 리더)가 본문보다 앞서고, 철도 분기기 표의 '# 8 …' 행이 마크다운
+// 헤딩으로 오인되어 문서 전체가 (서두) 한 덩어리로 뭉개졌다.
+
+const 품셈_목차 = [
+  '제4장 조경공사 91',
+  '4-1 잔디 및 초화류 ······························91',
+  '4-1-1 \t잔디붙임 \t································································91',
+  '4-1-2 \t판형잔디붙임 \t··························································91',
+].join('\n');
+
+const 품셈_본문 = [
+  '4-1-1 \t잔디붙임(\'06, \t\'13, \t\'19, \t\'24년 \t보완)',
+  '(일당)',
+  '구 \t분 \t단 \t위 \t수 \t량 시공량(㎡)',
+  '줄떼 \t평떼',
+  '조 \t경 \t공 \t인 \t1 170 \t150',
+  '보 \t통 \t인 \t부 \t인 \t4',
+  '[주] \t① \t본 \t품은 \t재배잔디를 \t붙이는 \t기준이다.',
+].join('\n');
+
+// 철도 분기기 번호(#8, #10)가 줄머리에 오는 실제 표 행
+const 분기기_표 = '# 8 \t분 기 기 궤 \t도 \t공 \t인 \t37 \t35';
+
+function 품셈문서(root) {
+  writeFileSync(
+    join(root, '표준품셈-원문.txt'),
+    `${품셈_목차}\n${'채움 '.repeat(500)}\n${품셈_본문}\n${분기기_표}\n`,
+    'utf8',
+  );
+}
+
+test('표준품셈 검색은 목차가 아니라 실제 품 표 본문을 인용한다', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'kemcp-est-toc-'));
+  품셈문서(root);
+
+  const docs = await discoverReferenceDocuments(root, { maxFiles: 3, maxBytes: 8 * 1024 * 1024, maxDepth: 1 });
+  const results = searchReferenceDocuments(docs, '잔디붙임', { maxResults: 5 });
+
+  assert.ok(results.length >= 1, '검색 결과가 있어야 한다');
+  const quote = results[0].quote;
+  assert.doesNotMatch(quote, /·{5,}/, '목차의 점선 리더가 인용문에 들어가면 안 된다');
+  assert.match(quote, /조 ?경 ?공|보 ?통 ?인 ?부|170/, '실제 품 표 내용을 인용해야 한다');
+});
+
+test('표준품셈 텍스트는 절 번호 단위로 섹션이 분해된다', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'kemcp-est-sec-'));
+  품셈문서(root);
+
+  const docs = await discoverReferenceDocuments(root, { maxFiles: 3, maxBytes: 8 * 1024 * 1024, maxDepth: 1 });
+  const results = searchReferenceDocuments(docs, '잔디붙임', { maxResults: 5 });
+
+  assert.notEqual(results[0].section, '(서두)', '문서 전체가 (서두) 한 덩어리면 안 된다');
+  assert.match(results[0].section, /4-1-1/, '섹션 제목이 해당 절 번호여야 한다');
+});
+
+test('본문의 # 로 시작하는 표 행을 마크다운 헤딩으로 오인하지 않는다', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'kemcp-est-hash-'));
+  품셈문서(root);
+
+  const docs = await discoverReferenceDocuments(root, { maxFiles: 3, maxBytes: 8 * 1024 * 1024, maxDepth: 1 });
+  assert.equal(docs.length, 1);
+  assert.doesNotMatch(docs[0].title, /분 ?기 ?기/, '분기기 표 행이 문서 제목이 되면 안 된다');
+});
+
+
+// ── 건설기준 검색: 분야 가산점만으로 통과하는 문제 회귀 테스트 ──────
+// '경계석'처럼 어떤 기준 제목에도 없는 낱말로 검색하면 분야 분류가 '공통'으로
+// 떨어지고, 공통(10 계열) 가산점만으로 점수가 0을 넘어 무관한 공통기준 23건이
+// 검색결과처럼 반환됐다. 가산점은 순위 조정용이지 통과 자격이 아니다.
+
+const 기준목록 = [
+  { codeType: 'KDS', code: '100000', name: '공통설계기준', no: 1 },
+  { codeType: 'KCS', code: '101005', name: '공사일반', no: 2 },
+  { codeType: 'KCS', code: '346025', name: '조경포장경계', no: 3 },
+  { codeType: 'KDS', code: '346010', name: '보도포장', no: 4 },
+  { codeType: 'SMCS', code: '346030', name: '서울시 조경포장', no: 5 },
+];
+const 공통분야 = [{ key: 'general', label: '공통·융합', standard_prefixes: ['10'], score: 0 }];
+
+test('제목에 검색어가 없으면 분야 가산점이 있어도 결과로 통과시키지 않는다', () => {
+  const r = rankStandards(기준목록, ['경계석'], 공통분야, {});
+  assert.equal(r.length, 0, '무관한 공통기준이 결과로 나오면 안 된다');
+});
+
+test('제목이 일치하는 기준은 정상 반환된다', () => {
+  const r = rankStandards(기준목록, ['포장경계'], 공통분야, {});
+  assert.equal(r.length, 1);
+  assert.equal(r[0].item.code, '346025');
+});
+
+test('분야 가산점은 통과 자격이 아니라 순위 조정에만 쓰인다', () => {
+  const 조경분야 = [{ key: 'landscape', label: '조경·생태', standard_prefixes: ['34'], score: 4 }];
+  const r = rankStandards(기준목록, ['포장'], 조경분야, {});
+  const codes = r.map((x) => x.item.code);
+  assert.ok(codes.includes('346025') && codes.includes('346010'), '포장이 제목에 있는 기준은 모두 포함');
+  assert.ok(codes.indexOf('346010') < codes.indexOf('100000') || !codes.includes('100000'));
+});
+
+test('기관·지자체 기준은 기본적으로 제외된다', () => {
+  const r = rankStandards(기준목록, ['조경포장'], 공통분야, {});
+  assert.ok(!r.some((x) => x.item.codeType === 'SMCS'), 'SMCS는 기본 제외');
+  const withLocal = rankStandards(기준목록, ['조경포장'], 공통분야, { includeLocalStandards: true });
+  assert.ok(withLocal.some((x) => x.item.codeType === 'SMCS'), 'opt-in 시 포함');
+});
+
+test('분야를 명시하면 다른 분야 기준은 제목이 맞아도 제외된다', () => {
+  // '연못 방수'에 landscape를 지정했는데 터널·하천 '방수' 기준이 상위로 나오던 문제.
+  const 목록 = [
+    { codeType: 'KDS', code: '275005', name: '터널 배수 및 방수', no: 1 },
+    { codeType: 'KDS', code: '515050', name: '지하방수로', no: 2 },
+    { codeType: 'KDS', code: '345035', name: '수경시설', no: 3 },
+  ];
+  const 조경 = [{ key: 'landscape', label: '조경·생태', standard_prefixes: ['34'], score: 100 }];
+  const r = rankStandards(목록, ['연못', '방수'], 조경, { restrictPrefixes: ['34'] });
+  assert.equal(r.length, 0, '조경 계열에 제목 일치가 없으면 타 분야를 끌어오지 않는다');
+
+  const 미지정 = rankStandards(목록, ['연못', '방수'], 조경, {});
+  assert.ok(미지정.length >= 2, '분야 한정이 없으면 종전대로 동작');
+});
+
+test('검색어의 띄어쓰기 차이를 무시하고 센다', () => {
+  // 기준 원문은 '투수성 포장'(10회), 실무 검색어는 '투수성포장'. 띄어쓰기 때문에
+  // 정작 맞는 기준(KDS 34 60 10 보도포장)을 놓치던 문제.
+  assert.equal(countFlexible('투수성 포장을 적용한다', '투수성포장'), 1);
+  assert.equal(countFlexible('투수성포장을 적용한다', '투수성 포장'), 1);
+  assert.equal(countFlexible('투수성  포장 및 투수성포장', '투수성포장'), 2);
+  assert.equal(countFlexible('아스팔트 포장', '투수성포장'), 0);
+});
+
+test('띄어쓰기 무시 매칭이 제목 검색에도 적용된다', () => {
+  const 목록 = [{ codeType: 'KDS', code: '445000', name: '도로 포장 설계', no: 1 }];
+  const r = rankStandards(목록, ['도로포장'], [], {});
+  assert.equal(r.length, 1, "'도로포장'이 '도로 포장 설계'를 찾아야 한다");
+});
+
+test('정규식 특수문자가 든 검색어도 안전하게 처리된다', () => {
+  assert.equal(countFlexible('백호0.4 굴착', '백호0.4'), 1);
+  assert.equal(countFlexible('백호0X4 굴착', '백호0.4'), 0, '.이 임의문자로 해석되면 안 된다');
+});
+
+test('실무 용어를 기준 원문 용어로 확장한다', () => {
+  // 기준 원문은 '퍼걸러'(50회)를 쓰는데 실무는 '파고라'(11회)로 부른다.
+  const r = expandSearchTerms(['파고라']);
+  assert.ok(r.includes('파고라') && r.includes('퍼걸러'), '동의어가 함께 검색되어야 한다');
+});
+
+test('동의어가 없는 검색어는 그대로 둔다', () => {
+  assert.deepEqual(expandSearchTerms(['분수']), ['분수']);
+});
+
+test('동의어 확장은 중복 없이 이루어진다', () => {
+  const r = expandSearchTerms(['경계석', '연석']);
+  assert.equal(new Set(r).size, r.length, '중복 항목이 없어야 한다');
+});
+
+
+// ── 기준 목록(/CodeList) 디스크 캐시 ────────────────────────────
+// 본문 1,334건은 디스크에 캐시하면서 목록은 메모리(1시간)뿐이었다. KCSC API가
+// 불통이면 본문 캐시가 멀쩡해도 목록을 못 받아 검색 전체가 불능이 됐다.
+
+test('기준 목록 디스크 캐시를 기록하고 다시 읽는다', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kemcp-codelist-'));
+  const path = join(dir, 'code-list.json');
+  const 목록 = [{ codeType: 'KDS', code: '346010', name: '보도포장', no: 1 }];
+  assert.equal(writeCodeListDiskCache(목록, path), true);
+  const cached = readCodeListDiskCache(path);
+  assert.ok(cached, '기록한 캐시를 읽을 수 있어야 한다');
+  assert.deepEqual(cached.list, 목록);
+  assert.ok(cached.fetchedAt > 0, '수집 시각이 함께 저장되어야 한다');
+});
+
+test('손상되거나 빈 목록 캐시는 없는 것으로 취급한다', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kemcp-codelist-bad-'));
+  const path = join(dir, 'code-list.json');
+  writeFileSync(path, '{깨진 JSON', 'utf8');
+  assert.equal(readCodeListDiskCache(path), null, '손상 파일은 null');
+  writeFileSync(path, JSON.stringify({ fetched_at: 1, list: [] }), 'utf8');
+  assert.equal(readCodeListDiskCache(path), null, '빈 목록은 폴백 가치가 없으므로 null');
+  assert.equal(readCodeListDiskCache(join(dir, '없는파일.json')), null);
 });

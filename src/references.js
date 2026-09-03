@@ -15,18 +15,23 @@ export async function extractPdfText(buffer) {
   }
 }
 
-export function parseReferenceSections(content) {
-  const lines = String(content || "").replace(/^\uFEFF/, "").split(/\r?\n/);
+// 목차 줄 표식. PDF에서 추출한 목차는 제목과 쪽번호 사이를 점선 리더로 채운다.
+const TOC_LEADER = /[·.．]{5,}|…{3,}/;
+
+// 품셈·시방서류가 공통으로 쓰는 절 번호(4-1-1, 3-11-2 …)로 시작하는 줄.
+const CLAUSE_HEADING = /^\s*\d+-\d+(?:-\d+)?\s+\S/;
+
+function buildSections(lines, isHeading, toTitle) {
   const sections = [];
   let title = "(서두)";
   let body = [];
   let started = false;
   for (const line of lines) {
-    if (/^#{1,6}\s/.test(line)) {
+    if (isHeading(line)) {
       if (started || body.some((item) => item.trim())) {
         sections.push({ title, content: body.join("\n").trim() });
       }
-      title = line.replace(/^#+\s*/, "").trim();
+      title = toTitle(line);
       body = [];
       started = true;
     } else {
@@ -39,6 +44,29 @@ export function parseReferenceSections(content) {
   return sections.filter((section) => section.title || section.content);
 }
 
+// 마크다운은 '#' 헤딩으로 자르지만, PDF/TXT에서 추출한 텍스트에 같은 규칙을 쓰면
+// 본문 표의 '# 8 분기기…'(철도 분기기 번호) 같은 줄이 헤딩으로 오인되어 문서
+// 전체가 (서두) 한 덩어리로 뭉개진다. 형식별로 분해 방식을 나눈다.
+export function parseReferenceSections(content, options = {}) {
+  const raw = String(content || "").replace(/^\uFEFF/, "").split(/\r?\n/);
+  if (options.format === "text") {
+    // 목차 줄은 색인에서 제외한다. 남겨두면 본문보다 앞서 있어 검색 스니펫을
+    // 매번 선점하고, 정작 품 표 본문은 노출되지 않는다.
+    const lines = raw.filter((line) => !TOC_LEADER.test(line));
+    // 절 번호가 전혀 없는 평문이면 종전대로 통째로 한 섹션이 된다.
+    return buildSections(
+      lines,
+      (line) => CLAUSE_HEADING.test(line),
+      (line) => line.replace(/\s+/g, " ").trim(),
+    );
+  }
+  return buildSections(
+    raw,
+    (line) => /^#{1,6}\s/.test(line),
+    (line) => line.replace(/^#+\s*/, "").trim(),
+  );
+}
+
 // 섹션이 짧으면(마크다운 등) 그대로 잘라내지만, PDF처럼 제목 구분 없이
 // 문서 전체가 섹션 하나로 들어오는 경우 항상 맨 앞부분만 보여주면 실제
 // 매칭 위치(예: 수백 페이지 중 한 줄)를 놓치게 된다. 검색어가 등장하는
@@ -47,18 +75,42 @@ function compact(value, keywords = [], max = 700) {
   const normalized = String(value || "").replace(/\s+/g, " ").trim();
   if (normalized.length <= max) return normalized;
 
-  let matchIndex = -1;
+  // 최초 출현을 그대로 쓰면, 목차가 본문보다 앞서는 문서에서 목차 줄이 매번
+  // 스니펫을 선점한다. 모든 출현 위치를 모아 주변 키워드 밀도가 가장 높은
+  // 구간을 고르고, 목차로 보이는 구간에는 감점을 준다.
+  const positions = [];
   for (const keyword of keywords) {
     if (!keyword) continue;
-    const found = normalized.indexOf(keyword);
-    if (found !== -1 && (matchIndex === -1 || found < matchIndex)) matchIndex = found;
+    let from = 0;
+    let found = normalized.indexOf(keyword, from);
+    while (found !== -1 && positions.length < 500) {
+      positions.push(found);
+      from = found + keyword.length;
+      found = normalized.indexOf(keyword, from);
+    }
   }
-  if (matchIndex === -1) {
+  if (!positions.length) {
     return `${normalized.slice(0, max)}…`;
   }
 
   const half = Math.floor(max / 2);
-  const start = Math.max(0, Math.min(matchIndex - half, normalized.length - max));
+  const windowStart = (pos) => Math.max(0, Math.min(pos - half, normalized.length - max));
+  let matchIndex = positions[0];
+  let bestScore = -Infinity;
+  for (const pos of positions) {
+    const window = normalized.slice(windowStart(pos), windowStart(pos) + max);
+    let score = 0;
+    for (const keyword of keywords) {
+      if (keyword) score += window.split(keyword).length - 1;
+    }
+    if (TOC_LEADER.test(window)) score -= 1;
+    if (score > bestScore) {
+      bestScore = score;
+      matchIndex = pos;
+    }
+  }
+
+  const start = windowStart(matchIndex);
   const end = Math.min(normalized.length, start + max);
   const prefix = start > 0 ? "…" : "";
   const suffix = end < normalized.length ? "…" : "";
@@ -97,11 +149,16 @@ export async function discoverReferenceDocuments(referenceDir, options = {}) {
     try {
       const stat = statSync(filePath);
       if (!stat.isFile() || stat.size <= 0 || stat.size > maxBytes) continue;
-      const isPdf = extname(filePath).toLowerCase() === ".pdf";
+      const ext = extname(filePath).toLowerCase();
+      const isPdf = ext === ".pdf";
+      const isMarkdown = ext === ".md" || ext === ".markdown";
       const raw = isPdf ? await extractPdfText(readFileSync(filePath)) : readFileSync(filePath, "utf8");
       const rel = relative(root, filePath).replace(/\\/g, "/");
-      const sections = parseReferenceSections(raw);
-      const firstHeading = sections.find((section) => section.title !== "(서두)")?.title;
+      const sections = parseReferenceSections(raw, { format: isMarkdown ? "markdown" : "text" });
+      // 절 번호 섹션 제목은 문서 제목이 아니다. 마크다운의 첫 헤딩만 제목으로 승격한다.
+      const firstHeading = isMarkdown
+        ? sections.find((section) => section.title !== "(서두)")?.title
+        : undefined;
       const domainMatches = classifyEngineeringDomains(`${rel} ${firstHeading || ""} ${raw.slice(0, 1200)}`, 3);
       const primaryDomain = domainMatches[0];
       documents.push({

@@ -318,16 +318,60 @@ async function fetchKCSC(path) {
   return res.json();
 }
 
+// 목록도 디스크에 캐시한다. 메모리 캐시(1시간)뿐이면 KCSC API 불통 시 본문
+// 캐시 49MB가 멀쩡해도 목록을 못 받아 검색 전체가 불능이 된다. 신선하면(24시간)
+// API를 건너뛰고, API가 실패하면 낡은 캐시라도 stale로 쓴다.
+const CODELIST_DISK_TTL_MS = Number(process.env.CODELIST_DISK_TTL_MS) || 24 * 60 * 60 * 1000;
+const CODELIST_CACHE_PATH = process.env.CODELIST_CACHE_PATH
+  || join(homedir(), ".korean-engineering-mcp", "code-list.json");
+
+export function readCodeListDiskCache(path = CODELIST_CACHE_PATH) {
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf8"));
+    if (Array.isArray(raw.list) && raw.list.length) {
+      return { list: raw.list, fetchedAt: raw.fetched_at || 0 };
+    }
+  } catch {
+    // 캐시 없음/손상 → 없는 것으로 취급
+  }
+  return null;
+}
+
+export function writeCodeListDiskCache(list, path = CODELIST_CACHE_PATH) {
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify({ fetched_at: Date.now(), list }), "utf8");
+    return true;
+  } catch {
+    return false; // 캐시 기록 실패가 검색을 막지 않는다
+  }
+}
+
 // 전체 기준 목록은 크고 자주 쓰이므로 TTL 캐시 적용
 async function getCodeList() {
   const now = Date.now();
   if (codeListCache.data && now - codeListCache.fetchedAt < CODELIST_CACHE_TTL_MS) {
     return codeListCache.data;
   }
-  const data = await fetchKCSC("/CodeList");
-  const list = Array.isArray(data) ? data : [];
-  codeListCache = { data: list, fetchedAt: now };
-  return list;
+  const disk = readCodeListDiskCache();
+  if (disk && now - disk.fetchedAt < CODELIST_DISK_TTL_MS) {
+    codeListCache = { data: disk.list, fetchedAt: now };
+    return disk.list;
+  }
+  try {
+    const data = await fetchKCSC("/CodeList");
+    const list = Array.isArray(data) ? data : [];
+    if (list.length) writeCodeListDiskCache(list);
+    codeListCache = { data: list, fetchedAt: now };
+    return list;
+  } catch (error) {
+    if (disk) {
+      // KCSC 불통 — TTL이 지난 캐시라도 검색을 세우는 것보다 낫다
+      codeListCache = { data: disk.list, fetchedAt: now };
+      return disk.list;
+    }
+    throw error;
+  }
 }
 
 // ── 법제처 API ────────────────────────────────────────────────
@@ -404,9 +448,247 @@ export function scoreText(text, keywords) {
   return keywords.reduce((score, kw) => score + (haystack.includes(kw) ? 1 : 0), 0);
 }
 
+// 기준 원문과 실무 검색어는 띄어쓰기가 자주 다르다('투수성 포장' vs '투수성포장',
+// '도로 포장 설계' vs '도로포장'). 글자 사이에 공백을 허용하는 정규식으로 세어
+// 띄어쓰기 차이 때문에 정작 맞는 기준을 놓치지 않게 한다.
+const flexibleTermCache = new Map();
+
+function flexibleTermRegex(term) {
+  const key = String(term || "");
+  if (flexibleTermCache.has(key)) return flexibleTermCache.get(key);
+  const chars = [...key].filter((c) => !/\s/.test(c)).map(escapeRegExp);
+  const regex = chars.length ? new RegExp(chars.join("\\s*"), "g") : null;
+  flexibleTermCache.set(key, regex);
+  return regex;
+}
+
+// 실무 용어와 기준 원문 용어가 다르면 검색이 통째로 실패한다('파고라' vs '퍼걸러').
+// data/term-synonyms.json에 등록된 조합을 검색어에 함께 넣는다.
+let termSynonymGroups = null;
+
+function getTermSynonymGroups() {
+  if (termSynonymGroups) return termSynonymGroups;
+  try {
+    const raw = JSON.parse(readFileSync(join(__dirname, "data", "term-synonyms.json"), "utf8"));
+    termSynonymGroups = (raw.groups || []).filter((g) => Array.isArray(g) && g.length > 1);
+  } catch {
+    termSynonymGroups = [];
+  }
+  return termSynonymGroups;
+}
+
+export function expandSearchTerms(terms) {
+  const groups = getTermSynonymGroups();
+  const out = [];
+  for (const term of terms || []) {
+    if (!out.includes(term)) out.push(term);
+    for (const group of groups) {
+      if (!group.includes(term)) continue;
+      for (const alt of group) if (!out.includes(alt)) out.push(alt);
+    }
+  }
+  return out;
+}
+
+export function countFlexible(text, term) {
+  const regex = flexibleTermRegex(term);
+  if (!regex) return 0;
+  regex.lastIndex = 0;
+  return (String(text || "").match(regex) || []).length;
+}
+
+function scoreTextFlexible(text, keywords) {
+  return (keywords || []).reduce((score, kw) => score + (countFlexible(text, kw) > 0 ? 1 : 0), 0);
+}
+
 function standardAuthorityRank(codeType) {
   const rank = { KDS: 1, KCS: 2, KWCS: 3, LHCS: 4, SMCS: 5, EXCS: 6, NHCS: 7, KRCCS: 8, KRACS: 9 };
   return rank[codeType] || 99;
+}
+
+// 기준 제목 기반 검색 순위 산정. 세 도구(search_standards·grounded_engineering_research·
+// comprehensive_research)가 같은 규칙을 쓰도록 한 곳에 모았다.
+//
+// 핵심: 분야 가산점(domainBoost)은 **순위 조정용이지 통과 자격이 아니다.** 예전에는
+// `keywordScore * 10 + domainBoost > 0`으로 걸러서, 검색어가 어떤 제목에도 없으면
+// 분야 분류가 '공통'으로 떨어지고 공통(10 계열) 가산점만으로 무관한 기준 23건이
+// 검색결과처럼 반환됐다('경계석', '연석', 심지어 무의미한 문자열도 동일). 검색어가
+// 하나도 맞지 않으면 결과에서 제외한다.
+// restrictPrefixes: 사용자가 분야를 명시하면(domain !== "auto") 그 분야 코드 계열로
+// 한정한다. 가산점만으로는 부족했다 — '연못 방수'에 조경을 지정해도 제목에 '방수'가
+// 든 터널·하천 기준이 keywordScore로 이겨 상위를 차지했다.
+export function rankStandards(list, searchTerms, detectedDomains, options = {}) {
+  const { type = "ALL", includeLocalStandards = false, limit, restrictPrefixes } = options;
+  const prefixes = Array.isArray(restrictPrefixes) && restrictPrefixes.length ? restrictPrefixes : null;
+  const ranked = (list || [])
+    .filter((item) => !prefixes || prefixes.some((p) => String(item.code || "").startsWith(p)))
+    .map((item) => {
+      const keywordScore = scoreTextFlexible(`${item.code || ""} ${item.fullCode || ""} ${item.name || ""}`, searchTerms);
+      const domainBoost = standardDomainBoost(item, detectedDomains);
+      return { item, score: keywordScore * 10 + domainBoost, keywordScore, domainBoost };
+    })
+    .filter(({ item, keywordScore }) => {
+      if (keywordScore <= 0) return false;
+      if (type !== "ALL") return item.codeType === type;
+      return includeLocalStandards || ["KDS", "KCS"].includes(item.codeType);
+    })
+    .sort((a, b) => b.score - a.score
+      || b.keywordScore - a.keywordScore
+      || standardAuthorityRank(a.item.codeType) - standardAuthorityRank(b.item.codeType));
+  return typeof limit === "number" ? ranked.slice(0, limit) : ranked;
+}
+
+// ── 기준 본문 검색 ────────────────────────────────────────────
+// KCSC OpenAPI는 목록(/CodeList, 제목만)과 상세(/CodeViewer, 본문)만 제공하고
+// 본문 검색 엔드포인트가 없다. '경계석'·'연석'처럼 부재 이름은 어떤 기준 제목에도
+// 없어 제목 검색으로는 영원히 안 잡히므로, 후보 기준의 본문을 받아 직접 훑는다.
+// 본문은 프로세스 수명 동안 캐시한다(기준 1건당 약 70ms).
+const standardBodyCache = new Map();
+// KDS+KCS 전체가 1,334건이므로 기본 상한은 전량을 덮는다. 상한에 걸려 조용히
+// 누락되면 "본문에도 없음"과 구분이 안 되므로, 잘린 경우 결과에 명시한다.
+const STANDARD_BODY_SCAN_LIMIT = Number(process.env.STANDARD_BODY_SCAN_LIMIT) || 2000;
+const STANDARD_BODY_CONCURRENCY = Number(process.env.STANDARD_BODY_CONCURRENCY) || 10;
+// 본문은 개정이 잦지 않다. 디스크에 캐시해 두면 서버를 재시작해도 다시 받지 않는다.
+const STANDARD_BODY_CACHE_DIR = process.env.STANDARD_BODY_CACHE_DIR
+  || join(homedir(), ".korean-engineering-mcp", "standard-bodies");
+const STANDARD_BODY_CACHE_TTL_MS = Number(process.env.STANDARD_BODY_CACHE_TTL_MS) || 30 * 24 * 60 * 60 * 1000;
+
+function standardBodyCachePath(item) {
+  const safe = `${item.codeType}-${String(item.code).replace(/[^\dA-Za-z]/g, "")}`;
+  return join(STANDARD_BODY_CACHE_DIR, `${safe}.json`);
+}
+
+async function getStandardBodySections(item) {
+  const cacheKey = `${item.codeType}:${item.code}`;
+  if (standardBodyCache.has(cacheKey)) return standardBodyCache.get(cacheKey);
+
+  const cachePath = standardBodyCachePath(item);
+  try {
+    const cached = JSON.parse(readFileSync(cachePath, "utf8"));
+    if (Date.now() - (cached.fetched_at || 0) < STANDARD_BODY_CACHE_TTL_MS && Array.isArray(cached.sections)) {
+      standardBodyCache.set(cacheKey, cached.sections);
+      return cached.sections;
+    }
+  } catch {
+    // 캐시 없음/손상 → 새로 받는다.
+  }
+
+  let sections = [];
+  let ok = false;
+  try {
+    const data = await fetchKCSC(`/CodeViewer/${item.codeType}/${encodeURIComponent(String(item.code).replace(/\s+/g, ""))}`);
+    const detail = Array.isArray(data) ? data[0] : data;
+    sections = (detail?.list || []).map((s) => ({
+      title: String(s.title || "").trim(),
+      text: stripHtml(s.contents || ""),
+    }));
+    ok = true;
+  } catch {
+    sections = []; // 개별 기준 조회 실패가 전체 검색을 막지 않는다.
+  }
+
+  standardBodyCache.set(cacheKey, sections);
+  if (ok) {
+    try {
+      mkdirSync(STANDARD_BODY_CACHE_DIR, { recursive: true });
+      writeFileSync(cachePath, JSON.stringify({ fetched_at: Date.now(), sections }), "utf8");
+    } catch {
+      // 캐시 기록 실패는 검색을 막지 않는다.
+    }
+  }
+  return sections;
+}
+
+// 분야가 확실히 잡히면 그 코드 계열로 범위를 좁힌다(조경이면 34 계열 77건).
+// 못 잡으면 KDS/KCS 전체를 훑되 상한을 둔다.
+function scopeBodyCandidates(list, detectedDomains, { type, includeLocalStandards }) {
+  const typed = (list || []).filter((item) => {
+    if (type !== "ALL") return item.codeType === type;
+    return includeLocalStandards || ["KDS", "KCS"].includes(item.codeType);
+  });
+  const prefixes = (detectedDomains || [])
+    .filter((d) => (d.score || 0) > 0)
+    .flatMap((d) => d.standard_prefixes || []);
+  if (prefixes.length) {
+    const scoped = typed.filter((item) => prefixes.some((p) => String(item.code || "").startsWith(p)));
+    if (scoped.length) {
+      const labels = (detectedDomains || []).filter((d) => (d.score || 0) > 0).map((d) => d.label).join("·");
+      return { candidates: scoped, scopeLabel: labels };
+    }
+  }
+  return { candidates: typed, scopeLabel: type === "ALL" ? "KDS/KCS 전체" : `${type} 전체` };
+}
+
+export async function searchStandardBodies(list, searchTerms, options = {}) {
+  const { type = "ALL", includeLocalStandards = false, detectedDomains = [], limit = 20 } = options;
+  const { candidates, scopeLabel } = scopeBodyCandidates(list, detectedDomains, { type, includeLocalStandards });
+  const truncated = candidates.length > STANDARD_BODY_SCAN_LIMIT;
+  const scanList = candidates.slice(0, STANDARD_BODY_SCAN_LIMIT);
+
+  const results = [];
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < scanList.length) {
+      const item = scanList[cursor++];
+      const sections = await getStandardBodySections(item);
+      // scoreText는 키워드당 0/1이라 본문 검색에서는 전부 동점이 되어 코드 순서로
+      // 밀린다. 출현 횟수로 세고, 절 제목에 걸린 경우와 분야 일치에 가산점을 준다.
+      let total = 0;
+      let best = null;
+      for (const section of sections) {
+        // 절 제목만 있고 본문이 비었거나 제목과 같은 절이 있다. 그대로 이으면
+        // 인용문에 같은 문장이 두 번 나온다.
+        const body = String(section.text || "").trim();
+        const title = String(section.title || "").trim();
+        const haystack = !body || body === title ? title : `${title}\n${body}`;
+        let occurrences = 0;
+        let titleHit = false;
+        for (const term of searchTerms) {
+          if (!term) continue;
+          occurrences += countFlexible(haystack, term);
+          if (countFlexible(section.title || "", term) > 0) titleHit = true;
+        }
+        if (!occurrences) continue;
+        const sectionScore = occurrences + (titleHit ? 5 : 0);
+        total += sectionScore;
+        if (!best || sectionScore > best.sectionScore) {
+          best = { sectionScore, sectionTitle: section.title || "(제목 없음)", text: haystack };
+        }
+      }
+      if (best) {
+        results.push({
+          item,
+          sectionTitle: best.sectionTitle,
+          snippet: compactText(centerOnKeyword(best.text, searchTerms), 260),
+          hitScore: total + standardDomainBoost(item, detectedDomains),
+        });
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(STANDARD_BODY_CONCURRENCY, scanList.length) }, worker));
+
+  results.sort((a, b) => b.hitScore - a.hitScore
+    || standardAuthorityRank(a.item.codeType) - standardAuthorityRank(b.item.codeType)
+    || String(a.item.code).localeCompare(String(b.item.code)));
+  return { results: results.slice(0, limit), scanned: scanList.length, truncated, scopeLabel };
+}
+
+// 긴 절에서 검색어가 나오는 지점을 중심으로 잘라낸다.
+function centerOnKeyword(text, keywords, width = 260) {
+  const flat = String(text || "").replace(/\s+/g, " ").trim();
+  if (flat.length <= width) return flat;
+  let at = -1;
+  for (const kw of keywords) {
+    if (!kw) continue;
+    const regex = flexibleTermRegex(kw);
+    if (!regex) continue;
+    regex.lastIndex = 0;
+    const hit = regex.exec(flat);
+    if (hit && (at === -1 || hit.index < at)) at = hit.index;
+  }
+  if (at === -1) return flat;
+  const start = Math.max(0, Math.min(at - Math.floor(width / 2), flat.length - width));
+  return `${start > 0 ? "…" : ""}${flat.slice(start, start + width)}…`;
 }
 
 function sourceUrlForStandard(item) {
@@ -423,16 +705,10 @@ async function findStandardEvidence(query, {
   const list = await getCodeList();
   const keywords = meaningfulKeywords(query);
   const searchTerms = keywords.length ? keywords : keywordsFrom(query);
-  const allowedTypes = includeLocalStandards ? null : new Set(["KDS", "KCS"]);
-  const candidates = list
-    .map((item) => {
-      const keywordScore = scoreText(`${item.code || ""} ${item.fullCode || ""} ${item.name || ""}`, searchTerms);
-      const domainBoost = standardDomainBoost(item, detectedDomains);
-      return { item, score: keywordScore * 10 + domainBoost, keywordScore, domainBoost };
-    })
-    .filter(({ item, score }) => score > 0 && (!allowedTypes || allowedTypes.has(item.codeType)))
-    .sort((a, b) => b.score - a.score || b.keywordScore - a.keywordScore || standardAuthorityRank(a.item.codeType) - standardAuthorityRank(b.item.codeType))
-    .slice(0, maxStandards);
+  const candidates = rankStandards(list, searchTerms, detectedDomains, {
+    includeLocalStandards,
+    limit: maxStandards,
+  });
 
   // 상세 조회는 서로 독립적이므로 병렬 실행
   const entries = await Promise.all(candidates.map(async ({ item, score }) => {
@@ -916,7 +1192,10 @@ server.tool(
       maxBytes: 80 * 1024 * 1024,
       maxDepth: 1,
     });
-    const results = searchReferenceDocuments(docs, query, { domain: "auto", maxResults: max_results });
+    // 캐시 파일명(표준품셈-원문)이 아니라 CODIL 게시물 제목("2026년 건설공사 표준품셈")을
+    // 문서 제목으로 노출한다. 인용 시 몇 년판인지 바로 드러나야 한다.
+    const results = searchReferenceDocuments(docs, query, { domain: "auto", maxResults: max_results })
+      .map((item) => ({ ...item, document_title: source.title || item.document_title }));
     const payload = {
       source: {
         title: source.title,
@@ -1013,32 +1292,58 @@ server.tool(
     const list = await getCodeList();
     const detectedDomains = resolveEngineeringDomains(query, domain, 2);
     const keywords = meaningfulKeywords(query);
-    const searchTerms = keywords.length ? keywords : [query.trim()].filter(Boolean);
-    const matched = list
-      .map((item) => {
-        const keywordScore = scoreText(`${item.code || ""} ${item.fullCode || ""} ${item.name || ""}`, searchTerms);
-        const domainBoost = standardDomainBoost(item, detectedDomains);
-        return { item, score: keywordScore * 10 + domainBoost, keywordScore, domainBoost };
-      })
-      .filter(({ item, score }) => {
-        if (score <= 0) return false;
-        if (type !== "ALL") return item.codeType === type;
-        return include_local_standards || ["KDS", "KCS"].includes(item.codeType);
-      })
-      .sort((a, b) => b.score - a.score || b.keywordScore - a.keywordScore || standardAuthorityRank(a.item.codeType) - standardAuthorityRank(b.item.codeType));
+    const searchTerms = expandSearchTerms(keywords.length ? keywords : [query.trim()].filter(Boolean));
+    // 분야를 명시했으면 그 계열로 한정한다. auto면 종전대로 전 분야에서 찾는다.
+    const restrictPrefixes = domain !== "auto"
+      ? detectedDomains.flatMap((d) => d.standard_prefixes || [])
+      : null;
+    const matched = rankStandards(list, searchTerms, detectedDomains, {
+      type,
+      includeLocalStandards: include_local_standards,
+      restrictPrefixes,
+    });
 
     const results = matched.slice(0, limit).map(({ item }) => item);
 
-    if (!results.length) return { content: [{ type: "text", text: `'${query}' 검색 결과 없음` }] };
+    if (results.length) {
+      const countLabel = matched.length > results.length
+        ? `총 ${matched.length}건 중 상위 ${results.length}건 표시`
+        : `${results.length}건`;
+      const lines = [`검색결과: '${query}' (${countLabel})\n`];
+      for (const item of results) {
+        lines.push(`[${item.codeType}] ${item.code} - ${item.name}`);
+        lines.push(`  버전: ${item.version || "-"} | 수정일: ${item.updateDate?.split("T")[0] || "-"}`);
+        lines.push(`  원문: https://www.kcsc.re.kr/StandardCode/Viewer/${item.no}`);
+        lines.push("");
+      }
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    }
 
-    const countLabel = matched.length > results.length
-      ? `총 ${matched.length}건 중 상위 ${results.length}건 표시`
-      : `${results.length}건`;
-    const lines = [`검색결과: '${query}' (${countLabel})\n`];
-    for (const item of results) {
-      lines.push(`[${item.codeType}] ${item.code} - ${item.name}`);
-      lines.push(`  버전: ${item.version || "-"} | 수정일: ${item.updateDate?.split("T")[0] || "-"}`);
-      lines.push(`  원문: https://www.kcsc.re.kr/StandardCode/Viewer/${item.no}`);
+    // 제목 검색이 비면 본문까지 뒤진다. KCSC OpenAPI에는 본문 검색 엔드포인트가
+    // 없어 후보 기준의 CodeViewer를 받아 직접 훑는다. '경계석'처럼 부재 이름은
+    // 어떤 기준 제목에도 없지만 본문(KCS 34 60 25 조경포장경계)에는 존재한다.
+    const bodyHits = await searchStandardBodies(list, searchTerms, {
+      type,
+      includeLocalStandards: include_local_standards,
+      detectedDomains,
+      limit,
+    });
+
+    if (!bodyHits.results.length) {
+      const scopeNote = `제목 및 본문 검색 모두 일치 없음 (본문 ${bodyHits.scanned}건 확인${bodyHits.truncated ? ", 범위 제한됨" : ""})`;
+      return { content: [{ type: "text", text: `'${query}' 검색 결과 없음\n  ${scopeNote}` }] };
+    }
+
+    const lines = [
+      `검색결과: '${query}' — 제목 일치 없음, 본문에서 ${bodyHits.results.length}건 발견`,
+      `  (본문 ${bodyHits.scanned}건 확인${bodyHits.truncated ? ", 범위 제한됨" : ""}${bodyHits.scopeLabel ? ` · 범위: ${bodyHits.scopeLabel}` : ""})\n`,
+    ];
+    for (const hit of bodyHits.results) {
+      lines.push(`[${hit.item.codeType}] ${hit.item.code} - ${hit.item.name}`);
+      lines.push(`  버전: ${hit.item.version || "-"} | 수정일: ${hit.item.updateDate?.split("T")[0] || "-"}`);
+      lines.push(`  일치 절: ${hit.sectionTitle}`);
+      lines.push(`  본문: ${hit.snippet}`);
+      lines.push(`  원문: https://www.kcsc.re.kr/StandardCode/Viewer/${hit.item.no}`);
       lines.push("");
     }
     return { content: [{ type: "text", text: lines.join("\n") }] };
@@ -1432,15 +1737,7 @@ server.tool(
       const list = Array.isArray(kcscRes.value) ? kcscRes.value : [];
       const keywords = meaningfulKeywords(sq);
       const searchTerms = keywords.length ? keywords : [sq.trim()].filter(Boolean);
-      const matched = list
-        .map((item) => {
-          const keywordScore = scoreText(`${item.code || ""} ${item.name || ""}`, searchTerms);
-          const domainBoost = standardDomainBoost(item, detectedDomains);
-          return { item, score: keywordScore * 10 + domainBoost };
-        })
-        .filter(({ score }) => score > 0)
-        .sort((a, b) => b.score - a.score || standardAuthorityRank(a.item.codeType) - standardAuthorityRank(b.item.codeType))
-        .slice(0, 6)
+      const matched = rankStandards(list, searchTerms, detectedDomains, { limit: 6 })
         .map(({ item }) => item);
 
       if (matched.length) {
